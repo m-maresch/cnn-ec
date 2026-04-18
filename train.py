@@ -9,6 +9,7 @@
 import argparse
 import logging
 import os
+import sys
 import time
 
 from contextlib import nullcontext
@@ -29,6 +30,7 @@ from torch.optim import lr_scheduler
 import torchvision
 
 from torchvision import datasets, models, transforms
+from torchvision.models.swin_transformer import SwinTransformer
 
 import loftnn
 
@@ -40,13 +42,16 @@ from loftnn.types import Device, Worker
 def parse_args():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("--model", type=str, default="resnet50")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--log_level", type=str, default="WARNING")
     parser.add_argument("--num_epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=24)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--plot", type=bool, default=False)
+    parser.add_argument("--run_experiments", type=bool, default=False)
     # parallelism
-    parser.add_argument("--parallelism", type=str)
+    parser.add_argument("--parallelism", type=str, default="hybrid")
     # pipeline parallelism
     parser.add_argument("--num_microbatches", type=int, default=4)
     # hybrid pipeline parallelism
@@ -61,16 +66,21 @@ def parse_args():
     parser.add_argument("--device_groups", type=str)
     parser.add_argument("--samples_allocated", type=str)
     parser.add_argument("--activation_checkpointing_budgets", type=str, default="[]")
+    parser.add_argument("--use_ambp", type=bool, default=True)
 
     args = parser.parse_args()
 
+    model = args.model
     device = args.device
     log_level = args.log_level
     num_epochs = args.num_epochs
     batch_size = args.batch_size
     gradient_accumulation_steps = args.gradient_accumulation_steps
+    plot = args.plot
+    run_experiments = args.run_experiments
     parallelism = args.parallelism
     num_microbatches = args.num_microbatches
+    use_ambp = args.use_ambp
 
     def eval_complex_arg(arg):
         if arg is None:
@@ -88,11 +98,14 @@ def parse_args():
     )
 
     return (
+        model,
         device,
         log_level,
         num_epochs,
         batch_size,
         gradient_accumulation_steps,
+        plot,
+        run_experiments,
         parallelism,
         num_microbatches,
         planner,
@@ -102,15 +115,19 @@ def parse_args():
         device_groups,
         samples_allocated,
         activation_checkpointing_budgets,
+        use_ambp,
     )
 
 
 (
+    model_name,
     device,
     log_level,
     num_epochs,
     batch_size,
     gradient_accumulation_steps,
+    plot,
+    run_experiments,
     parallelism,
     num_microbatches,
     planner,
@@ -120,6 +137,7 @@ def parse_args():
     device_groups,
     samples_allocated,
     activation_checkpointing_budgets,
+    use_ambp,
 ) = parse_args()
 
 logging.basicConfig(level=log_level)
@@ -132,11 +150,14 @@ has_pipeline_parallelism = is_pipeline_parallel or is_hybrid_pipeline_parallel
 
 print(
     f"""Using:
+    model = {model_name},
     device = {device},
     log_level = {log_level},
     num_epochs = {num_epochs},
     batch_size = {batch_size},
     gradient_accumulation_steps = {gradient_accumulation_steps},
+    plot = {plot},
+    run_experiments = {run_experiments},
     parallelism = {parallelism}"""
 )
 
@@ -157,7 +178,8 @@ elif is_hybrid_pipeline_parallel:
     split_points = {split_points},
     device_groups = {device_groups},
     samples_allocated = {samples_allocated}
-    activation_checkpointing_budgets = {activation_checkpointing_budgets}
+    activation_checkpointing_budgets = {activation_checkpointing_budgets},
+    use_ambp = {use_ambp}
     """
     )
 else:
@@ -286,6 +308,7 @@ def train_model(model, optimizer, scheduler, num_epochs):
         best_acc = 0.0
 
         epoch_times = []
+        epoch_losses = []
         for epoch in range(num_epochs):
             print(f"Epoch {epoch}/{num_epochs - 1}")
             print("-" * 10)
@@ -319,7 +342,6 @@ def train_model(model, optimizer, scheduler, num_epochs):
                             model.require_backward_grad_sync = (
                                 micro_step == gradient_accumulation_steps - 1
                             )
-
                         inputs = inputs.to(device)
                         labels = labels.to(device)
 
@@ -355,13 +377,13 @@ def train_model(model, optimizer, scheduler, num_epochs):
                         optimizer.step()
                         # flush the gradients as soon as we can, no need for this memory anymore
                         optimizer.zero_grad(set_to_none=True)
-                        scheduler.step()
 
                 epoch_time = None
                 if phase == "train":
                     epoch_train_end = time.time()
                     epoch_time = epoch_train_end - epoch_train_start
-                    epoch_times.append(epoch_time)
+
+                    scheduler.step()
 
                 if master_or_last_process:
                     epoch_loss = losses.mean()
@@ -371,6 +393,8 @@ def train_model(model, optimizer, scheduler, num_epochs):
 
                     print(f"{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}")
                     if epoch_time is not None:
+                        epoch_times.append(epoch_time)
+                        epoch_losses.append(epoch_loss.item())
                         print(f"{phase} Time: {epoch_time*1000:.2f}ms")
 
                     # deep copy the model
@@ -390,6 +414,7 @@ def train_model(model, optimizer, scheduler, num_epochs):
             f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s"
         )
         print(f"Epoch times: {epoch_times}s")
+        print(f"Epoch losses: {epoch_losses}")
 
         if master_or_last_process:
             print(f"Best val Acc: {best_acc:4f}")
@@ -397,18 +422,64 @@ def train_model(model, optimizer, scheduler, num_epochs):
     return model
 
 
-model_ft = models.resnet50(weights="IMAGENET1K_V1")
-num_ftrs = model_ft.fc.in_features
-# Here the size of each output sample is set to 2.
-# Alternatively, it can be generalized to ``nn.Linear(num_ftrs, len(class_names))``.
-model_ft.fc = nn.Linear(num_ftrs, 2)
+if model_name == "resnet50":
+    model = models.resnet50(weights=None)
+    num_ftrs = model.fc.in_features
+    # Here the size of each output sample is set to 2.
+    # Alternatively, it can be generalized to ``nn.Linear(num_ftrs, len(class_names))``.
+    model.fc = nn.Linear(num_ftrs, 2)
+elif model_name == "swin_b":
+    model = models.swin_v2_b(weights=None)
+    model.head = nn.Linear(model.head.in_features, 2)
+elif model_name == "swin_l1":
+    model = SwinTransformer(
+        patch_size=[4, 4],
+        embed_dim=416,
+        depths=[2, 2, 18, 2],
+        num_heads=[13, 26, 52, 104],
+        window_size=[7, 7],
+        stochastic_depth_prob=0.5,
+        num_classes=2,
+    )
+else:
+    raise ValueError(f"Unknown model {model_name}")
 
-model_ft = model_ft.to(device)
+model = model.to(device)
 inputs = inputs.to(device)
+
+if plot and master_process:
+    from loftnn.tools.plot import plot_model, plot_parameters_by_layer
+
+    plot_model(model, "resnet50", inputs)
+    plot_parameters_by_layer(model)
+
+if run_experiments:
+    from loftnn.experiments import ExperimentRunner
+    from loftnn.worker_groups import randomized_worker_group
+
+    import loftnn.experiment_planning_time_scaling
+
+    configurations = [
+        (
+            f"ResNet-50 with {i} workers",
+            model,
+            torch.Size([240, 3, 224, 224]),
+            inputs.dtype,
+            randomized_worker_group(i, batch_size_limit=240),
+            240,
+            4,
+            False,
+            Device.cuda if device == "cuda" else Device.cpu,
+        )
+        for i in range(3, 10 + 1)
+    ]
+    ExperimentRunner.run_all(configurations)
+
+    sys.exit()
 
 if is_data_parallel:
     dist_model = DataParallel(
-        model=model_ft,
+        model=model,
         process_config=process_config,
         device=Device.cuda if device == "cuda" else Device.cpu,
     )
@@ -422,9 +493,10 @@ elif is_pipeline_parallel:
     )
 
     dist_model = PipelineParallel(
-        model_ft,
+        model,
         process_config=process_config,
         pipeline_config=pipeline_config,
+        device=Device.cuda if device == "cuda" else Device.cpu,
     )
 elif is_hybrid_pipeline_parallel:
     microbatch_sample = inputs.chunk(num_microbatches)[0]
@@ -436,7 +508,7 @@ elif is_hybrid_pipeline_parallel:
     )
 
     dist_model = HybridPipelineParallel(
-        model_ft,
+        model,
         process_config=process_config,
         hybrid_pipeline_config=pipeline_config,
         device=Device.cuda if device == "cuda" else Device.cpu,
@@ -451,7 +523,7 @@ elif is_hybrid_pipeline_parallel:
                     compute_capacity=(
                         compute_capacities[r] if compute_capacities else 1 / 1000
                     ),
-                    batch_size_limits=(
+                    batch_size_limit=(
                         batch_size_limits[r] if batch_size_limits else 100
                     ),
                 ): samples_allocated[r]
@@ -465,7 +537,7 @@ elif is_hybrid_pipeline_parallel:
             device_groups,
             samples_allocated,
             activation_checkpointing_budgets,
-        ) = dist_model.compute_plan(batch_size_limits)
+        ) = dist_model.compute_plan(use_ambp, batch_size_limits)
 
     print("using hybrid pipeline parallelism with the following plan:")
     print(f"    split points = {split_points}")
@@ -480,16 +552,14 @@ elif is_hybrid_pipeline_parallel:
     # computing the plan advances the RNG of the master process
     seed()  # needed to make sure that X and Y are aligned during training
 
-if parallelism is not None:
-    model_ft = dist_model
+if parallelism != "none":
+    model = dist_model
 
-# Observe that all parameters are being optimized
-optimizer_ft = optim.SGD(model_ft.parameters(), lr=0.001, momentum=0.9)
-
+optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
 # Decay LR by a factor of 0.1 every 7 epochs
-exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
+exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
 
-model_ft = train_model(model_ft, optimizer_ft, exp_lr_scheduler, num_epochs=num_epochs)
+model = train_model(model, optimizer, exp_lr_scheduler, num_epochs=num_epochs)
 
 
 def visualize_model(model, num_images=6):
@@ -542,12 +612,12 @@ def visualize_model_predictions(model, img_path):
 
 
 if parallelism is None:
-    visualize_model(model_ft)
+    visualize_model(model)
 
     plt.show()
 
     visualize_model_predictions(
-        model_ft, img_path="data/hymenoptera_data/val/bees/72100438_73de9f17af.jpg"
+        model, img_path="data/hymenoptera_data/val/bees/72100438_73de9f17af.jpg"
     )
 
     plt.show()
