@@ -1,6 +1,6 @@
 # CNN and ViT training with LoftNN
 
-This repository adapts [Transfer Learning for Computer Vision](https://docs.pytorch.org/tutorials/beginner/transfer_learning_tutorial.html) to integrate the parallelism types provided by [LoftNN](https://github.com/m-maresch/loftnn).
+This repository adapts [Transfer Learning for Computer Vision](https://docs.pytorch.org/tutorials/beginner/transfer_learning_tutorial.html) to integrate the parallelism types provided by [LoftNN](https://github.com/m-maresch/loftnn) for distributed training.
 
 Support for both CNNs (ResNet50) and ViTs (Swin Transformers) is provided.
 
@@ -14,6 +14,8 @@ python train.py --device=cuda --parallelism='hybrid' --log_level="INFO" --planne
 
 python train.py --device=cuda --parallelism='hybrid' --log_level="INFO" --planner="exact"
 ```
+
+Note that multiple environment variables need to be set for LoftNN to be available for distributed training. See details [here](https://github.com/m-maresch/loftnn#example-usage).
 
 ## Dependencies
 
