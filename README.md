@@ -2,7 +2,7 @@
 
 This repository adapts [Transfer Learning for Computer Vision](https://docs.pytorch.org/tutorials/beginner/transfer_learning_tutorial.html) to integrate the parallelism types provided by [LoftNN](https://github.com/m-maresch/loftnn) for distributed training.
 
-Support for both CNNs (ResNet50) and ViTs (Swin Transformers) is provided.
+Support for both CNNs (ResNets) and ViTs (Swin Transformers) is provided.
 
 ## Example usage
 ```

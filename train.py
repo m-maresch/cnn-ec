@@ -422,11 +422,15 @@ def train_model(model, optimizer, scheduler, num_epochs):
     return model
 
 
-if model_name == "resnet50":
-    model = models.resnet50(weights=None)
+if model_name == "resnet18":
+    model = models.resnet18(weights=None)
     num_ftrs = model.fc.in_features
     # Here the size of each output sample is set to 2.
     # Alternatively, it can be generalized to ``nn.Linear(num_ftrs, len(class_names))``.
+    model.fc = nn.Linear(num_ftrs, 2)
+elif model_name == "resnet50":
+    model = models.resnet50(weights=None)
+    num_ftrs = model.fc.in_features
     model.fc = nn.Linear(num_ftrs, 2)
 elif model_name == "swin_b":
     model = models.swin_v2_b(weights=None)
