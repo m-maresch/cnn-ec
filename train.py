@@ -66,7 +66,10 @@ def parse_args():
     parser.add_argument("--device_groups", type=str)
     parser.add_argument("--samples_allocated", type=str)
     parser.add_argument("--activation_checkpointing_budgets", type=str, default="[]")
-    parser.add_argument("--use_ambp", type=bool, default=True)
+    parser.add_argument(
+        "--use_ambp", dest="use_ambp", action="store_true", default=True
+    )
+    parser.add_argument("--no_ambp", dest="use_ambp", action="store_false")
 
     args = parser.parse_args()
 
