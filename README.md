@@ -21,7 +21,7 @@ Note that multiple environment variables need to be set for LoftNN to be availab
 
 This project is licensed under the MIT License. See the `LICENSE` file for details. Third-party library notices are documented in `THIRD-PARTY-NOTICES.txt`.
 
-The code is based on the [Transfer Learning for Computer Vision](https://docs.pytorch.org/tutorials/beginner/transfer_learning_tutorial.html), which is licensed under the BSD License. See the code for details.
+The code is based on [Transfer Learning for Computer Vision](https://docs.pytorch.org/tutorials/beginner/transfer_learning_tutorial.html), which is licensed under the BSD License. See the code for details.
 
 ## Dependencies
 
