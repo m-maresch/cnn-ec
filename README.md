@@ -15,7 +15,7 @@ python train.py --device=cuda --parallelism='hybrid' --log_level="INFO" --planne
 python train.py --device=cuda --parallelism='hybrid' --log_level="INFO" --planner="exact"
 ```
 
-Note that multiple environment variables need to be set for LoftNN to be available for distributed training. See details [here](https://github.com/m-maresch/loftnn#example-usage).
+Note that multiple environment variables need to be set for LoftNN to be available for distributed training. See details [here](https://github.com/m-maresch/loftnn#distributed-training).
 
 ## License
 
